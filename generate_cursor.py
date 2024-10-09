@@ -11,6 +11,7 @@ from model import PythiaForCausalLM, KVCache
 
 default_device = 'cpu'
 
+
 def device_sync(device):
     if "cuda" in device:
         torch.cuda.synchronize(device)
@@ -34,11 +35,13 @@ def _get_model_size(model):
 
 
 def top_k_(logits, top_k=50, filter_value=-float("Inf")):
-    # Flatten the logits to process each set independently
-    values_to_keep, _ = torch.topk(logits, top_k, dim=-1)
-    # Create a mask to zero out anything below the top k
-    min_threshold = values_to_keep[..., -1, None]
-    logits = torch.where(logits >= min_threshold, logits, torch.full_like(logits, filter_value))
+    # (TODO) Task 7 - Implement top-k sampling
+    # Filter logits to only keep the top-k values
+    # For the top-k values, keep them as they are, set the rest to filter_value
+    top_k_values, _ = torch.topk(logits, top_k, dim=-1)
+    min_top_k = top_k_values[..., -1, None]
+    # Set all logits below the top k threshold to the filter_value
+    logits[logits < min_top_k] = filter_value
     return logits
 
 
@@ -47,24 +50,18 @@ def top_p_(logits, top_p=0.9, min_tokens_to_keep=1, filter_value=-float("Inf")):
     # The function should filter out logits such that the cumulative probability exceeds `top_p`.
     # The function should keep at least `min_tokens_to_keep` tokens.
     # Hint: softmax the logits and calculate the cumulative probabilities.
-    # Compute softmax and sort to obtain cumulative probabilities
+    # Sort the logits and calculate cumulative probabilities
     sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-    sorted_probs = torch.softmax(sorted_logits, dim=-1)
-    
-    cumulative_probs = sorted_probs.cumsum(dim=-1)
-    
-    # Create a mask to filter out probabilities above top_p threshold
-    sorted_mask = cumulative_probs <= top_p
-    sorted_mask[..., :min_tokens_to_keep] = True  # Ensure at least min_tokens_to_keep are not masked
-
-    # Now we map the mask back to the original logits ordering
-    sorted_masked_logits = sorted_logits.masked_fill(~sorted_mask, filter_value)
-    
-    # Scatter them back to match original positions
-    top_p_filtered_logits = torch.full_like(logits, filter_value)
-    top_p_filtered_logits.scatter_(dim=-1, index=sorted_indices, src=sorted_masked_logits)
-
-    return top_p_filtered_logits
+    cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+    # Mask out the logits that exceed the cumulative probability threshold
+    sorted_indices_to_remove = cumulative_probs > top_p
+    if sorted_indices_to_remove[..., 1:].shape[-1] > 0:
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+    # Set the filtered logits to the filter value
+    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+    logits[indices_to_remove] = filter_value
+    return logits
 
 
 def logits_to_probs(
@@ -89,11 +86,11 @@ def logits_to_probs(
     return probs
 
 
-def stop_on_eos(token: torch.Tensor, tokenizer) -> bool:
+def stop_on_eos(token: torch.Tensor) -> bool:
     # (TODO) Task 6 - Implement stopping on EOS token
     # Return True if the token is an EOS token, False otherwise
     # Hint: EOS token you can find in the tokenizer
-    return token.item() == tokenizer.eos_token_id
+    pass
 
 
 def prefill(
@@ -115,23 +112,15 @@ def prefill(
     # Hint: use `logits_to_probs` to get the probabilities from the logits
     # Hint: check CausalLMOutputWithPast for the return type of `model.forward`
     # Hint: You should use `torch.multinomial` and pass the `generator`, so we can reproduce the results
-    # Run model to get logits
-    # Run model to get logits
-    outputs = model(input_ids=x, attention_mask=attention_mask)
-    logits = outputs.logits[:, -1, :]  # Consider only the last token
-
-    # Convert logits to probabilities using the provided function
-    probs = logits_to_probs(logits, temperature=temperature, top_k=top_k, top_p=top_p)
-    
-    # Sample the next token from the probability distribution and return as a scalar
-    next_token = torch.multinomial(probs, num_samples=1, generator=generator).squeeze()
-    
-    # Retrieve key-value caches for future use
-
-    kvcaches = outputs.kvcaches
-    
+    logits = model.forward(x, attention_mask=attention_mask).logits
+    probs = logits_to_probs(logits, top_k=top_k, top_p=top_p, temperature=temperature)
+    if probs.dim() > 2:
+        probs = probs.view(-1, probs.size(-1))
+    next_token = torch.multinomial(probs, num_samples=1, generator=generator).squeeze(-1)
+    if next_token.dim() > 0:
+        next_token = next_token.item()
+    kvcaches = model.forward(x, attention_mask=attention_mask).kvcaches
     return next_token, kvcaches
-
 
 
 def decode(
@@ -144,7 +133,6 @@ def decode(
     top_p: Optional[float] = None,
     temperature: float = 1.0,
     generator: torch.Generator = None,
-    tokenizer=None,
 ) -> List[torch.Tensor]:
     # (TODO) Task 5 - Implement decoding
     # Input:  kvcaches - the key-value caches to be used in the decoding step
@@ -157,34 +145,7 @@ def decode(
 
     # (TODO) Task 6 - Implement stopping on EOS token
     # use `stop_on_eos` to check if the token is an EOS token, if so, break the loop
-    # Iteratively generate new tokens up to `num_new_tokens`
-    generated_tokens = []
-
-    # Loop to generate tokens
-    for _ in range(num_new_tokens):
-        outputs = model(input_ids=cur_token, attention_mask=attention_mask, kvcaches=kvcaches)
-        logits = outputs.logits[:, -1, :]  # Focus on the last token's logits
-
-        # Apply top-k and top-p sampling
-        if top_k is not None:
-            logits = top_k_(logits, top_k)
-        if top_p is not None:
-            logits = top_p_(logits, top_p)
-
-        # Sample next token
-        probs = torch.nn.functional.softmax(logits / temperature, dim=-1)
-        cur_token = torch.multinomial(probs, 1, generator=generator)
-
-        # Stop if EOS token is generated
-        if stop_on_eos(cur_token, tokenizer):
-            break
-
-        generated_tokens.append(cur_token.item())
-
-        # Update caches for the next step
-        kvcaches = outputs.kvcaches
-
-    return generated_tokens
+    pass
 
 
 @torch.no_grad()
@@ -196,7 +157,6 @@ def generate(
     top_k: Optional[int] = None,
     top_p: Optional[float] = None,
     temperature: float = 1.0,
-    tokenizer=None
 ) -> torch.Tensor:
     """
     Takes a conditioning sequence (prompt) as input and continues to generate as many tokens as requested.
@@ -218,7 +178,7 @@ def generate(
     seq[T] = next_token
 
     generated_tokens = decode(model, kvcaches, next_token.view(
-        1, -1), attention_mask.view(1, -1), max_new_tokens - 1, top_k, top_p, temperature, tokenizer)
+        1, -1), attention_mask.view(1, -1), max_new_tokens - 1, top_k, top_p, temperature)
     
     seq = seq[:T + 1 + len(generated_tokens)]
     seq[T + 1:] = torch.cat(generated_tokens)
@@ -257,7 +217,6 @@ def main():
     precision = torch.bfloat16
     print(f"\033[91m> Using device={args.device}, precision={precision}\033[0m")
 
-    global tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.checkpoint_path.parent, clean_up_tokenization_spaces=True)
     encoded = tokenizer(args.prompt, return_tensors="pt")
     prompt_length = encoded['input_ids'][0].size(0)
@@ -274,7 +233,7 @@ def main():
         device_sync(device=args.device)
         t0 = time.perf_counter()
         y = generate(model, encoded['input_ids'][0], encoded['attention_mask'][0], args.max_new_tokens,
-                     top_k=args.top_k, top_p=args.top_p, temperature=args.temperature, tokenizer=tokenizer)
+                     top_k=args.top_k, top_p=args.top_p, temperature=args.temperature)
         device_sync(device=args.device)  # MKG
         t = time.perf_counter() - t0
         print(tokenizer.decode(y))

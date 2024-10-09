@@ -19,10 +19,12 @@ def tokenizer():
 def test_stop_on_eos_true(tokenizer):
     # Test that stop_on_eos returns True for the EOS token
     eos_token = torch.tensor(tokenizer.eos_token_id)  # Use tokenizer to get EOS token ID
-    assert stop_on_eos(eos_token) is True
+    assert stop_on_eos(eos_token, tokenizer) is True
+    
 
 
 def test_stop_on_eos_false(tokenizer):
     # Test that stop_on_eos returns False for a non-EOS token
     non_eos_token = torch.tensor(tokenizer.encode("Hello"))  # Encode a regular token
-    assert stop_on_eos(non_eos_token) is False
+    assert stop_on_eos(non_eos_token, tokenizer) is False
+
