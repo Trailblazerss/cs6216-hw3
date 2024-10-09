@@ -157,32 +157,27 @@ def decode(
 
     # (TODO) Task 6 - Implement stopping on EOS token
     # use `stop_on_eos` to check if the token is an EOS token, if so, break the loop
-    # Iteratively generate new tokens up to `num_new_tokens`
     generated_tokens = []
-
-    # Loop to generate tokens
+    input_ids=cur_token
+    # Loop to generate tokens iteratively
     for _ in range(num_new_tokens):
-        outputs = model(input_ids=cur_token, attention_mask=attention_mask, kvcaches=kvcaches)
-        logits = outputs.logits[:, -1, :]  # Focus on the last token's logits
+        # Move to device
 
-        # Apply top-k and top-p sampling
-        if top_k is not None:
-            logits = top_k_(logits, top_k)
-        if top_p is not None:
-            logits = top_p_(logits, top_p)
+        # Run model to get logits
+        with torch.no_grad():
+            output = model(input_ids=input_ids)
+            logits = output.logits[:, -1, :] / temperature
 
-        # Sample next token
-        probs = torch.nn.functional.softmax(logits / temperature, dim=-1)
-        cur_token = torch.multinomial(probs, 1, generator=generator)
+        # Use top-k sampling to get next token
+        next_token_id = torch.argmax(logits, dim=-1)
+        generated_tokens.append(next_token_id.item())
 
         # Stop if EOS token is generated
-        if stop_on_eos(cur_token, tokenizer):
+        if stop_on_eos(next_token_id, tokenizer):
             break
 
-        generated_tokens.append(cur_token.item())
-
-        # Update caches for the next step
-        kvcaches = outputs.kvcaches
+        # Append generated token to input_ids
+        input_ids = torch.cat((input_ids, next_token_id.unsqueeze(-1)), dim=-1)
 
     return generated_tokens
 

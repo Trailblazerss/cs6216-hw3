@@ -274,9 +274,7 @@ class Attention(nn.Module):
         attn_output = attn_output.transpose(1, 2).contiguous().view(attn_output.size(0), -1, self.hidden_size)
         
         return attn_output
-        
-
-
+    
 class FeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
