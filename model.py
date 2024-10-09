@@ -245,32 +245,22 @@ class Attention(nn.Module):
         # 7. organize the attention output to [bs, seq_len, hidden_size] and return
 
         # Hint: use torch.finfo(attn_scores.dtype).min to get the mask value
-        # Step 1: Compute scaled dot-product attention scores
         attn_scores = torch.matmul(query, key.transpose(-1, -2)) * self.norm_factor
-
-        # Step 2: Apply causal mask (self.bias)
         if self.is_causal:
             seq_len = attn_scores.size(-1)
             causal_mask = self.bias[:, :, :seq_len, :seq_len]
             attn_scores = attn_scores.masked_fill(~causal_mask, torch.finfo(attn_scores.dtype).min)
-
-        # Step 3: Apply additional attention mask if provided
         if attention_mask is not None:
             attn_scores += attention_mask
 
-        # Step 4: Apply softmax to obtain attention probabilities
         attn_probs = torch.softmax(attn_scores, dim=-1)
         
-        # Step 5: Apply dropout to the attention probabilities
         attn_probs = self.attention_dropout(attn_probs)
 
-        # Step 6: Ensure dtype consistency for attn_probs and value before multiplication
         attn_probs = attn_probs.to(value.dtype)
         
-        # Step 7: Compute the attention output
         attn_output = torch.matmul(attn_probs, value)
 
-        # Step 8: Reshape to [batch_size, seq_len, hidden_size] from [batch_size, num_heads, seq_len, head_size]
         attn_output = attn_output.transpose(1, 2).contiguous().view(attn_output.size(0), -1, self.hidden_size)
         
         return attn_output
